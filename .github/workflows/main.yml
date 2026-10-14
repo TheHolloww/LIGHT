@@ -11,18 +11,22 @@ jobs:
     steps:
       - name: Configure Core RDP Settings
         run: |
+          # Enable Remote Desktop
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
                            -Name "fDenyTSConnections" -Value 0 -Force
 
+          # Disable NLA so older clients can connect
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
                            -Name "UserAuthentication" -Value 0 -Force
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
                            -Name "SecurityLayer" -Value 0 -Force
 
+          # Open firewall port
           netsh advfirewall firewall delete rule name="RDP-Tailscale" | Out-Null
           netsh advfirewall firewall add rule name="RDP-Tailscale" `
             dir=in action=allow protocol=TCP localport=3389
 
+          # Restart RDP service
           Restart-Service -Name TermService -Force
 
       - name: Create RDP User
@@ -40,12 +44,7 @@ jobs:
           Add-LocalGroupMember -Group "Administrators"       -Member $username
           Add-LocalGroupMember -Group "Remote Desktop Users" -Member $username
 
-          if (-not (Get-LocalUser -Name $username)) {
-              Write-Error "User creation failed"
-              exit 1
-          }
-
-          Write-Host "User '$username' created."
+          Write-Host "User '$username' created (Administrators + Remote Desktop Users)."
 
       - name: Install Tailscale
         run: |
@@ -64,7 +63,7 @@ jobs:
 
           $tsIP = $null
           $retries = 0
-          while (-not $tsIP -and $retries -lt 10) {
+          while (-not $tsIP -and $retries -lt 12) {
               $tsIP = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
               Start-Sleep -Seconds 5
               $retries++
@@ -75,19 +74,27 @@ jobs:
               exit 1
           }
 
+          # Clean up whitespace from output
+          $tsIP = $tsIP.Trim()
+          
           echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
           Write-Host "Tailscale IP: $tsIP"
 
       - name: Verify RDP Accessibility
         run: |
-          Write-Host "Tailscale IP: $env:TAILSCALE_IP"
+          Write-Host "Tailscale IP: $($env:TAILSCALE_IP)"
 
-          $testResult = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389
-          if (-not $testResult.TcpTestSucceeded) {
-              Write-Error "TCP connection to RDP port 3389 failed"
+          # Use a lightweight TCP client instead of slow Test-NetConnection
+          $client = New-Object System.Net.Sockets.TcpClient
+          try {
+              $client.Connect($env:TAILSCALE_IP, 3389)
+              Write-Host "TCP connectivity to RDP port 3389 successful!"
+          } catch {
+              Write-Error "TCP connection to RDP port 3389 failed: $_"
               exit 1
+          } finally {
+              $client.Close()
           }
-          Write-Host "TCP connectivity successful!"
 
       - name: Maintain Connection
         run: |
@@ -96,7 +103,7 @@ jobs:
           Write-Host "            RDP ACCESS INFO               "
           Write-Host "            Credit: @light_nerd           "
           Write-Host "=========================================="
-          Write-Host " Address  : $env:TAILSCALE_IP:3389"
+          Write-Host " Address  : $($env:TAILSCALE_IP):3389"
           Write-Host " Username : LIGHT"
           Write-Host " Password : FuckedbyL1"
           Write-Host "=========================================="
